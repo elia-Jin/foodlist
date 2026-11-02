@@ -1,0 +1,13 @@
+# 비밀 키가 들어 있는 환경 변수 파일 — 절대 올리지 않는다 (.env.example만 공유)
+.env
+.env.local
+.env.*.local
+
+# 엑셀 임시 파일 · OS 파일
+~$*
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Claude Code 개인 설정
+.claude/settings.local.json
