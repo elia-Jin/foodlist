@@ -26,12 +26,13 @@ React · Supabase 라이브러리는 CDN에서 불러오므로 인터넷 연결�
 
 ## Vercel 배포 (조회 전용)
 
-1. Vercel 프로젝트 → Settings → Build and Deployment → **Root Directory**를 `product-admin`으로 지정
-2. Settings → Environment Variables에 `SUPABASE_URL`, `SUPABASE_ANON_KEY` 두 개만 추가
-   - **SUPABASE_SERVICE_ROLE_KEY는 넣지 않는다.** 공개 사이트에서 누구나 DB를 바꿀 수 있게 된다
-3. Deployments → 최신 배포 → Redeploy
+Root Directory는 바꾸지 않는다 (저장소 루트 그대로). 루트의 `vercel.json`이 `/`를 `product-admin/index.html`로 연결한다.
 
-- 배포 사이트에서는 `api/config.js`가 URL · anon 키만 넘겨주므로 "조회 전용"으로 동작한다 (추가 · 삭제 불가)
+1. Vercel 프로젝트 → Settings → Environment Variables에 `SUPABASE_URL`, `SUPABASE_ANON_KEY` 두 개만 추가
+   - **SUPABASE_SERVICE_ROLE_KEY는 넣지 않는다.** 공개 사이트에서 누구나 DB를 바꿀 수 있게 된다
+2. Deployments → 최신 배포 → Redeploy
+
+- 배포 사이트에서는 루트의 `api/config.js`가 URL · anon 키만 넘겨주므로 "조회 전용"으로 동작한다 (추가 · 삭제 불가)
 - 추가 · 삭제는 로컬(`serve.ps1`)에서만 한다
 - anon 키로 읽을 수 있는 데이터(RLS "공개 읽기")는 누구나 볼 수 있다
 

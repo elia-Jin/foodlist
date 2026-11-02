@@ -1,0 +1,7 @@
+# Vercel 배포에는 관리 페이지(product-admin/index.html)와 api/만 필요하다
+.claude
+docs
+research
+*.md
+.env*
+product-admin/serve.ps1
