@@ -518,7 +518,11 @@ function App() {
   // { url, anonKey, serviceRoleKey } 로 연결하고 notice_types 조회로 연결 확인
   const connect = async (cfg, source) => {
     const read = makeClient(cfg.url, cfg.anonKey, "product-admin-read");
-    const admin = cfg.serviceRoleKey ? makeClient(cfg.url, cfg.serviceRoleKey, "product-admin-admin") : null;
+    // 관리자 키는 브라우저에 오지 않는다. 로컬 서버의 /sb 프록시가 키를 붙여 Supabase로 전달한다
+    // (직접 입력 화면은 예전처럼 입력한 키를 그대로 쓴다)
+    const admin = cfg.adminProxy
+      ? makeClient(location.origin + "/sb", "local-proxy", "product-admin-admin")
+      : cfg.serviceRoleKey ? makeClient(cfg.url, cfg.serviceRoleKey, "product-admin-admin") : null;
     const { data, error } = await read.from("notice_types").select("code, label").order("code");
     if (error) throw error;
     setNoticeTypes(data);
@@ -588,7 +592,7 @@ function App() {
         <h1>상품 관리 (로컬)</h1>
         <div className="row">
           <span style={{ color: "#cfe0f0" }}>
-            {conn.host} · {conn.source} · {conn.admin ? "관리 모드 (service_role)" : "조회 전용 (anon)"}
+            {conn.host} · {conn.source} · {conn.admin ? "관리 모드" : "조회 전용"}
           </span>
           {conn.admin && <button onClick={() => { setMode("add"); setSelectedId(null); setMessage(null); }}>+ 상품 추가</button>}
           <button onClick={() => { reset(); loadEnvConfig(); }}>설정 다시 읽기</button>

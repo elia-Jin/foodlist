@@ -40,10 +40,13 @@ Root Directory는 바꾸지 않는다 (저장소 루트 그대로). 루트의 `v
 
 | 변수 | 용도 |
 |---|---|
-| SUPABASE_ANON_KEY | 조회 · 검색 (RLS가 읽기만 허용) |
-| SUPABASE_SERVICE_ROLE_KEY | 추가 · 삭제. 없으면 "조회 전용"으로 동작하고 추가 · 삭제 버튼이 비활성 |
+| SUPABASE_ANON_KEY | 조회 · 검색 (RLS가 읽기만 허용). Publishable key(`sb_publishable_…`) 또는 예전 anon 키 |
+| SUPABASE_SERVICE_ROLE_KEY | 추가 · 삭제. Secret key(`sb_secret_…`) 또는 예전 service_role 키. 없으면 "조회 전용" |
 
-- service_role 키는 RLS를 무시하는 관리자 키다. `.env.local`은 공유 · 업로드하지 않는다
+- 관리자 키는 브라우저로 보내지 않는다. 페이지는 `/sb/rest/v1/...`로 요청하고, `serve.ps1`이 키를 붙여 Supabase로 전달한다
+  (Supabase는 secret 키를 브라우저에서 쓰면 거부하므로 이 방식이 필요하다)
+- `/sb/` 통로는 localhost 페이지에서 온 요청만 받는다 (다른 사이트 Origin은 403)
+- 관리자 키는 RLS를 무시한다. `.env.local`은 공유 · 업로드하지 않고, Vercel 환경 변수에도 넣지 않는다
 - `serve.ps1`은 localhost 요청에만 `/api/config`(키 포함)를 응답하고, `.env*` 같은 숨김 파일은 제공하지 않는다
 
 ## 기능

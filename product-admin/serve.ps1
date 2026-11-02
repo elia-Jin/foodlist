@@ -50,7 +50,42 @@ function Get-ConfigResponse {
     if ($url -notmatch "^https://[^/\s]+/?$") {
         return 500, (@{ error = "SUPABASE_URL 형식이 틀렸습니다. https://<프로젝트>.supabase.co 형태의 Project URL을 넣으세요 (postgres:// 접속 문자열 아님)" } | ConvertTo-Json -Compress)
     }
-    return 200, (@{ url = $url; anonKey = $anon; serviceRoleKey = $(if ($svc) { $svc } else { $null }) } | ConvertTo-Json -Compress)
+    # 관리자 키는 브라우저로 보내지 않는다. 있으면 /sb/ 프록시를 쓰라고만 알려준다
+    return 200, (@{ url = $url; anonKey = $anon; adminProxy = [bool]$svc } | ConvertTo-Json -Compress)
+}
+
+# /sb/rest/v1/... 요청을 관리자 키(secret 또는 service_role)를 붙여 Supabase로 전달한다
+# Supabase는 secret 키를 브라우저에서 쓰지 못하게 막으므로, 쓰기는 이 로컬 서버가 대신 보낸다
+Add-Type -AssemblyName System.Net.Http
+$http = New-Object System.Net.Http.HttpClient
+$passHeaders = "Prefer", "Accept", "Range", "Accept-Profile", "Content-Profile"
+
+function Invoke-AdminProxy($req, $res, $rel) {
+    $e = Read-EnvFile $envPath
+    $url = $e["SUPABASE_URL"]; $svc = $e["SUPABASE_SERVICE_ROLE_KEY"]
+    if (-not $url -or -not $svc -or $svc -match "[<>]") {
+        $res.StatusCode = 503; $res.ContentType = "application/json; charset=utf-8"
+        return [Text.Encoding]::UTF8.GetBytes('{"message":".env.local의 SUPABASE_SERVICE_ROLE_KEY가 비어 있어 추가 · 삭제를 할 수 없습니다"}')
+    }
+    $target = $url.TrimEnd("/") + "/" + $rel.Substring(3) + $req.Url.Query
+    $msg = New-Object System.Net.Http.HttpRequestMessage((New-Object System.Net.Http.HttpMethod($req.HttpMethod)), $target)
+    if ($req.HasEntityBody) {
+        $ms = New-Object IO.MemoryStream; $req.InputStream.CopyTo($ms)
+        $msg.Content = New-Object System.Net.Http.ByteArrayContent(, $ms.ToArray())
+        if ($req.ContentType) { $msg.Content.Headers.TryAddWithoutValidation("Content-Type", $req.ContentType) | Out-Null }
+    }
+    foreach ($h in $passHeaders) { if ($req.Headers[$h]) { $msg.Headers.TryAddWithoutValidation($h, $req.Headers[$h]) | Out-Null } }
+    $msg.Headers.TryAddWithoutValidation("apikey", $svc) | Out-Null
+    # 예전 JWT 형식 키(eyJ…)만 Authorization에도 넣는다. 새 secret 키(sb_secret_…)는 apikey 헤더만 쓴다
+    if ($svc.StartsWith("eyJ")) { $msg.Headers.TryAddWithoutValidation("Authorization", "Bearer $svc") | Out-Null }
+    $r = $http.SendAsync($msg).GetAwaiter().GetResult()
+    $res.StatusCode = [int]$r.StatusCode
+    if ($r.Content.Headers.ContentType) { $res.ContentType = $r.Content.Headers.ContentType.ToString() }
+    $cr = $null
+    if ($r.Content.Headers.TryGetValues("Content-Range", [ref]$cr) -or $r.Headers.TryGetValues("Content-Range", [ref]$cr)) {
+        $res.Headers.Add("Content-Range", ($cr -join ","))
+    }
+    return $r.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
 }
 
 $listener = New-Object System.Net.HttpListener
@@ -78,6 +113,17 @@ try {
                 }
                 $res.ContentType = "application/json; charset=utf-8"
                 $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+            } elseif ($rel.StartsWith("sb/rest/v1/")) {
+                # 관리자 권한으로 DB를 바꾸는 통로이므로 localhost 페이지에서 온 요청만 허용
+                # (다른 사이트가 이 주소로 몰래 요청을 보내지 못하도록 Origin도 검사)
+                $origin = $ctx.Request.Headers["Origin"]
+                if (-not $ctx.Request.IsLocal -or $ctx.Request.Url.Host -ne "localhost" -or
+                    ($origin -and $origin -ne "http://localhost:$Port")) {
+                    $res.StatusCode = 403; $res.ContentType = "application/json; charset=utf-8"
+                    $bytes = [Text.Encoding]::UTF8.GetBytes('{"message":"forbidden"}')
+                } else {
+                    $bytes = Invoke-AdminProxy $ctx.Request $res $rel
+                }
             } else {
                 $full = [IO.Path]::GetFullPath((Join-Path $root $rel))
                 $name = [IO.Path]::GetFileName($full)
