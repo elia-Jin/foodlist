@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>상품 관리 (로컬)</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --text: #1f2328; --muted: #656d76;
+      --line: #d8dee4; --accent: #1f4e78; --accent-text: #ffffff;
+      --danger: #b42318; --warn-bg: #fff4e5; --ok-bg: #e8f5e9; --err-bg: #fdecea;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font-family: "맑은 고딕", "Malgun Gothic", system-ui, sans-serif; font-size: 14px; }
+    header { background: var(--accent); color: var(--accent-text); padding: 12px 20px;
+             display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    header h1 { font-size: 18px; margin: 0; }
+    main { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.2fr); gap: 16px; padding: 16px 20px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    .panel h2 { font-size: 16px; margin: 0 0 12px; }
+    .panel h3 { font-size: 14px; margin: 18px 0 8px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    textarea { width: 100%; min-height: 60px; }
+    button { white-space: nowrap; font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
+    button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    button.danger { color: var(--danger); border-color: var(--danger); }
+    button:disabled { opacity: .5; cursor: default; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #f0f3f6; font-weight: 600; white-space: nowrap; }
+    tbody tr.clickable { cursor: pointer; }
+    tbody tr.clickable:hover { background: #f5f8fb; }
+    tbody tr.selected { background: #e7eef6; }
+    .num { text-align: right; white-space: nowrap; }
+    .muted { color: var(--muted); }
+    .msg { padding: 8px 12px; border-radius: 6px; margin: 0 20px; margin-top: 12px; white-space: pre-wrap; }
+    .msg.ok { background: var(--ok-bg); }
+    .msg.err { background: var(--err-bg); color: var(--danger); }
+    .warn { background: var(--warn-bg); padding: 8px 12px; border-radius: 6px; margin: 8px 0; }
+    .grid2 { display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; align-items: center; }
+    .grid2 label { color: var(--muted); }
+    .missing { color: var(--danger); }
+    .rows-editor td input, .rows-editor td select { width: 100%; }
+    .settings { max-width: 560px; margin: 40px auto; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+// ---------- 코드값 (01_schema.sql의 enum과 같아야 함) ----------
+const PHASE = { unopened: "개봉 전", opened: "개봉 후", received: "수령 후" };
+const STORAGE_TYPE = { room_temp: "상온", ambient: "실온", refrigerated: "냉장", frozen: "냉동" };
+const PERIOD_UNIT = { day: "일", week: "주", month: "개월" };
+const UNITS = ["g", "kg", "ml"];
+const ALLERGEN_TYPES = ["allergen_contains", "cross_contact"];
+const NOT_ALLERGEN = ["없음", "미확인"];   // 알레르기 검색에서 제외할 값
+
+const CONFIG_KEY = "productAdmin.config";
+
+// 브라우저 저장소는 막혀 있을 수 있으므로 항상 try/catch
+function loadSavedConfig() {
+  try { return JSON.parse(localStorage.getItem(CONFIG_KEY)) || null; } catch { return null; }
+}
+function saveConfig(cfg) {
+  try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch {}
+}
+function clearSavedConfig() {
+  try { localStorage.removeItem(CONFIG_KEY); } catch {}
+}
+
+// Supabase 오류를 사람이 읽을 수 있는 문장으로
+function explainError(err) {
+  if (!err) return "";
+  const msg = err.message || String(err);
+  if (err.code === "42501" || /row-level security/i.test(msg)) {
+    return msg + "\n→ 쓰기 권한이 없습니다. 추가 · 삭제는 service_role 키로 연결해야 합니다.";
+  }
+  if (err.code === "23505") return msg + "\n→ 이미 있는 값입니다 (상품코드 또는 같은 원재료 중복).";
+  if (err.code === "23503") return msg + "\n→ 참조하는 값이 없습니다 (주의사항 유형 코드 확인).";
+  return msg;
+}
+
+// 빈 문자열은 null로 (선택 입력 칸)
+const nullIfEmpty = (v) => (v === "" || v === undefined ? null : v);
+
+// PostgREST or() 필터 문법을 깨뜨리는 문자 제거
+const cleanSearch = (s) => s.trim().replace(/[%,()*]/g, "");
+
+// Project URL · 키 형식 검사. 문제가 없으면 빈 문자열
+function checkConfig(url, key) {
+  if (/[<>]/.test(url) || /[<>]/.test(key)) return "예시 문구(<...>)가 그대로 들어 있습니다. 대시보드 → Project Settings → API에서 복사한 실제 값을 넣으세요.";
+  if (!/^https:\/\/[^/\s]+\/?$/.test(url)) return "Project URL 형식이 틀렸습니다. https://<프로젝트>.supabase.co 형태여야 합니다 (postgres:// 접속 문자열 아님).";
+  return "";
+}
+
+// ---------- 연결 설정 화면 ----------
+function ConnectForm({ onConnect }) {
+  const saved = loadSavedConfig();
+  const [url, setUrl] = useState(saved?.url || "");
+  const [key, setKey] = useState(saved?.key || "");
+  const [remember, setRemember] = useState(!!saved);
+
+  const [formError, setFormError] = useState("");
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!url.trim() || !key.trim()) return;
+    const cfg = { url: url.trim(), key: key.trim() };
+    // 예시 문구를 그대로 넣었거나 Project URL이 아닌 값을 넣은 경우 먼저 알려준다
+    const err = checkConfig(cfg.url, cfg.key);
+    setFormError(err);
+    if (err) return;
+    if (remember) saveConfig(cfg); else clearSavedConfig();
+    onConnect(cfg);
+  };
+
+  return (
+    <div className="panel settings">
+      <h2>Supabase 직접 연결</h2>
+      <p className="muted">보통은 프로젝트 루트의 .env.local 값으로 자동 연결됩니다. 그게 안 될 때만 여기에 입력하세요.</p>
+      <form onSubmit={submit} className="grid2">
+        <label>Project URL</label>
+        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://xxxx.supabase.co" />
+        <label>API 키</label>
+        <input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="anon 또는 service_role 키" />
+        <span />
+        <label className="row" style={{ color: "inherit" }}>
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+          이 브라우저에 저장
+        </label>
+        <span />
+        <button className="primary" type="submit">연결</button>
+      </form>
+      {formError && <div className="msg err">{formError}</div>}
+      <div className="warn">
+        <b>조회만</b> 하려면 anon 키로 충분합니다. <b>추가 · 삭제</b>는 RLS 때문에 service_role 키가 필요합니다.<br />
+        service_role 키는 모든 권한을 가진 키입니다. 이 페이지는 로컬에서만 쓰고, 키를 코드나 파일에 적지 마세요.
+        "이 브라우저에 저장"을 켜면 키가 브라우저 저장소에 남습니다.
+      </div>
+    </div>
+  );
+}
+
+// ---------- 상품 목록 + 검색 ----------
+function ProductList({ client, selectedId, onSelect, reloadToken, onError }) {
+  const [products, setProducts] = useState([]);
+  const [text, setText] = useState("");
+  const [field, setField] = useState("product");
+  const [loading, setLoading] = useState(false);
+  const [searchToken, setSearchToken] = useState(0);   // 검색 · 초기화 때 증가
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      let q = client.from("products").select("id, name, category, net_amount, unit, price").order("id");
+      const s = cleanSearch(text);
+      if (s) {
+        if (field === "product") {
+          q = q.or(`id.ilike.%${s}%,name.ilike.%${s}%,description.ilike.%${s}%`);
+        } else {
+          // 원재료 · 알레르기 검색은 자식 테이블에서 상품코드를 먼저 찾는다
+          let sub = field === "ingredient"
+            ? client.from("product_ingredients").select("product_id").ilike("ingredient", `%${s}%`)
+            : client.from("product_notices").select("product_id")
+                .in("notice_type", ALLERGEN_TYPES)
+                .not("target", "in", `(${NOT_ALLERGEN.join(",")})`)
+                .ilike("target", `%${s}%`);
+          const { data: ids, error: subErr } = await sub;
+          if (subErr) throw subErr;
+          q = q.in("id", [...new Set(ids.map((r) => r.product_id))]);
+        }
+      }
+      const { data, error } = await q;
+      if (error) throw error;
+      setProducts(data);
+    } catch (err) {
+      onError(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [client, text, field, onError]);
+
+  // 처음 열 때, 검색할 때, 추가 · 삭제 후 다시 불러오기
+  useEffect(() => { load(); }, [client, reloadToken, searchToken]);   // eslint-disable-line
+
+  return (
+    <section className="panel">
+      <h2>상품 목록 <span className="muted">({products.length}건)</span></h2>
+      <form className="row" onSubmit={(e) => { e.preventDefault(); setSearchToken((t) => t + 1); }} style={{ marginBottom: 12 }}>
+        <select value={field} onChange={(e) => setField(e.target.value)}>
+          <option value="product">코드 · 이름 · 설명</option>
+          <option value="ingredient">원재료</option>
+          <option value="allergen">알레르기 성분</option>
+        </select>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="검색어" style={{ flex: 1, minWidth: 120 }} />
+        <button type="submit" disabled={loading}>{loading ? "검색 중…" : "검색"}</button>
+        {text && <button type="button" onClick={() => { setText(""); setSearchToken((t) => t + 1); }}>초기화</button>}
+      </form>
+      <table>
+        <thead>
+          <tr><th>코드</th><th>상품명</th><th>분류</th><th className="num">용량</th><th className="num">가격</th></tr>
+        </thead>
+        <tbody>
+          {products.map((p) => (
+            <tr key={p.id} className={"clickable" + (p.id === selectedId ? " selected" : "")} onClick={() => onSelect(p.id)}>
+              <td>{p.id}</td>
+              <td>{p.name}</td>
+              <td>{p.category || <span className="muted">-</span>}</td>
+              <td className="num">{Number(p.net_amount)}{p.unit}</td>
+              <td className="num">{p.price.toLocaleString()}원</td>
+            </tr>
+          ))}
+          {!loading && products.length === 0 && (
+            <tr><td colSpan={5} className="muted">결과가 없습니다.</td></tr>
+          )}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+// ---------- 상품 상세 ----------
+// client: 조회용(anon) · adminClient: 삭제용(service_role, 없으면 null)
+function ProductDetail({ client, adminClient, id, onDeleted, onError }) {
+  const [data, setData] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setData(null);
+    (async () => {
+      const [p, ing, st, nt] = await Promise.all([
+        client.from("products").select("*").eq("id", id).single(),
+        client.from("product_ingredients").select("*").eq("product_id", id).order("sort_order"),
+        client.from("storage_rules").select("*").eq("product_id", id).order("id"),
+        client.from("product_notices").select("*, notice_types(label)").eq("product_id", id).order("id"),
+      ]);
+      const err = p.error || ing.error || st.error || nt.error;
+      if (err) { onError(err); return; }
+      if (alive) setData({ product: p.data, ingredients: ing.data, storage: st.data, notices: nt.data });
+    })();
+    return () => { alive = false; };
+  }, [client, id, onError]);
+
+  const remove = async () => {
+    const p = data.product;
+    const ok = window.confirm(
+      `${p.id} ${p.name} 상품을 삭제할까요?\n원재료 · 보관규칙 · 주의사항도 함께 삭제되며 되돌릴 수 없습니다.`
+    );
+    if (!ok) return;
+    setDeleting(true);
+    // RLS로 막히면 오류 없이 0행이 지워지므로 select()로 지운 행을 확인
+    const { data: deleted, error } = await adminClient.from("products").delete().eq("id", p.id).select("id");
+    setDeleting(false);
+    if (error) { onError(error); return; }
+    if (!deleted || deleted.length === 0) {
+      onError({ message: "삭제된 행이 없습니다.", code: "42501" });
+      return;
+    }
+    onDeleted(p);
+  };
+
+  if (!data) return <section className="panel"><p className="muted">불러오는 중…</p></section>;
+  const { product: p, ingredients, storage, notices } = data;
+  const allergenChecked = notices.some((n) => n.notice_type === "allergen_contains" && n.target !== "미확인");
+
+  return (
+    <section className="panel">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>{p.id} {p.name}</h2>
+        <button className="danger" onClick={remove} disabled={deleting || !adminClient}
+                title={adminClient ? "" : "SUPABASE_SERVICE_ROLE_KEY가 없어 삭제할 수 없습니다"}>
+          {deleting ? "삭제 중…" : "삭제"}
+        </button>
+      </div>
+
+      <h3>기본 정보</h3>
+      <div className="grid2">
+        <label>분류</label><span>{p.category || <span className="muted">미입력</span>}</span>
+        <label>용량</label><span>{Number(p.net_amount)}{p.unit}{p.pack_count ? ` (${p.pack_count})` : ""}</span>
+        <label>가격</label><span>{p.price.toLocaleString()}원</span>
+        <label>판매기간</label><span>{p.sale_period || <span className="muted">-</span>}</span>
+        <label>설명</label><span>{p.description || <span className="muted">-</span>}</span>
+      </div>
+
+      <h3>원재료</h3>
+      {ingredients.length === 0 ? <p className="muted">등록된 원재료 없음</p> : (
+        <table>
+          <thead><tr><th>원재료</th><th>원산지</th><th>비율</th></tr></thead>
+          <tbody>{ingredients.map((r) => (
+            <tr key={r.id}>
+              <td>{r.ingredient}</td>
+              <td>{r.origin || <span className="missing">표기 없음</span>}</td>
+              <td>{r.ratio || ""}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+
+      <h3>보관규칙</h3>
+      {storage.length === 0 ? <p className="muted">등록된 보관규칙 없음</p> : (
+        <table>
+          <thead><tr><th>시점</th><th>보관방식</th><th className="num">기간</th><th className="num">환산일수</th><th>메모</th></tr></thead>
+          <tbody>{storage.map((r) => (
+            <tr key={r.id}>
+              <td>{PHASE[r.phase]}</td>
+              <td>{r.storage_type ? STORAGE_TYPE[r.storage_type] : <span className="missing">표기 없음</span>}</td>
+              <td className="num">{r.period === 0 ? "당일" : `${r.period}${PERIOD_UNIT[r.period_unit]}`}</td>
+              <td className="num">{r.period_days}일</td>
+              <td>{r.note || ""}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+
+      <h3>주의사항 {!allergenChecked && <span className="missing">(알레르기 정보 미확인)</span>}</h3>
+      {notices.length === 0 ? <p className="muted">등록된 주의사항 없음</p> : (
+        <table>
+          <thead><tr><th>유형</th><th>대상</th><th>내용</th></tr></thead>
+          <tbody>{notices.map((r) => (
+            <tr key={r.id}>
+              <td>{r.notice_types?.label || r.notice_type}</td>
+              <td>{r.target}</td>
+              <td>{r.detail || ""}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+// ---------- 여러 행 입력 표 (원재료 · 보관규칙 · 주의사항 공용) ----------
+function RowsEditor({ rows, setRows, columns, blank }) {
+  const update = (i, key, value) => setRows(rows.map((r, j) => (j === i ? { ...r, [key]: value } : r)));
+  return (
+    <table className="rows-editor">
+      <thead>
+        <tr>{columns.map((c) => <th key={c.key} style={{ width: c.width }}>{c.label}</th>)}<th style={{ width: 64 }} /></tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i}>
+            {columns.map((c) => (
+              <td key={c.key}>
+                {c.options ? (
+                  <select value={r[c.key]} onChange={(e) => update(i, c.key, e.target.value)}>
+                    {Object.entries(c.options).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                  </select>
+                ) : (
+                  <input type={c.type || "text"} value={r[c.key]} placeholder={c.placeholder || ""}
+                         onChange={(e) => update(i, c.key, e.target.value)} />
+                )}
+              </td>
+            ))}
+            <td><button type="button" onClick={() => setRows(rows.filter((_, j) => j !== i))}>삭제</button></td>
+          </tr>
+        ))}
+        <tr><td colSpan={columns.length + 1}>
+          <button type="button" onClick={() => setRows([...rows, { ...blank }])}>+ 행 추가</button>
+        </td></tr>
+      </tbody>
+    </table>
+  );
+}
+
+// ---------- 상품 추가 ----------
+const BLANK_PRODUCT = { id: "", name: "", category: "", net_amount: "", unit: "g", pack_count: "", price: "", description: "", sale_period: "" };
+const BLANK_INGREDIENT = { ingredient: "", origin: "", ratio: "" };
+const BLANK_STORAGE = { phase: "received", storage_type: "", period: "", period_unit: "day", note: "" };
+
+function ProductForm({ client, noticeTypes, onSaved, onCancel, onError }) {
+  const blankNotice = { notice_type: noticeTypes[0]?.code || "", target: "", detail: "" };
+  const [p, setP] = useState(BLANK_PRODUCT);
+  const [ingredients, setIngredients] = useState([{ ...BLANK_INGREDIENT }]);
+  const [storage, setStorage] = useState([{ ...BLANK_STORAGE }]);
+  const [notices, setNotices] = useState([blankNotice]);
+  const [saving, setSaving] = useState(false);
+  const set = (key) => (e) => setP({ ...p, [key]: e.target.value });
+
+  const validate = () => {
+    if (!/^P-[0-9]{4}$/.test(p.id)) return "상품코드는 P-0000 형식이어야 합니다.";
+    if (!p.name.trim()) return "상품명을 입력하세요.";
+    if (!(Number(p.net_amount) > 0)) return "용량은 0보다 큰 숫자여야 합니다.";
+    if (!Number.isInteger(Number(p.price)) || p.price === "" || Number(p.price) < 0) return "가격은 0 이상의 정수여야 합니다.";
+    for (const s of storage) {
+      if (s.period !== "" && !(Number.isInteger(Number(s.period)) && Number(s.period) >= 0)) return "보관 기간은 0 이상의 정수여야 합니다.";
+    }
+    return null;
+  };
+
+  const save = async (e) => {
+    e.preventDefault();
+    const invalid = validate();
+    if (invalid) { onError({ message: invalid }); return; }
+    setSaving(true);
+    const id = p.id;
+    try {
+      const { error } = await client.from("products").insert({
+        id, name: p.name.trim(), category: nullIfEmpty(p.category.trim()),
+        net_amount: Number(p.net_amount), unit: p.unit, pack_count: nullIfEmpty(p.pack_count.trim()),
+        price: Number(p.price), description: nullIfEmpty(p.description.trim()), sale_period: nullIfEmpty(p.sale_period.trim()),
+      });
+      if (error) throw error;
+
+      // 필수 칸이 빈 행은 건너뛴다
+      const ingRows = ingredients.filter((r) => r.ingredient.trim()).map((r, i) => ({
+        product_id: id, ingredient: r.ingredient.trim(), origin: nullIfEmpty(r.origin.trim()),
+        ratio: nullIfEmpty(r.ratio.trim()), sort_order: i + 1,
+      }));
+      const stRows = storage.filter((r) => r.period !== "").map((r) => ({
+        product_id: id, phase: r.phase, storage_type: nullIfEmpty(r.storage_type),
+        period: Number(r.period), period_unit: r.period_unit, note: nullIfEmpty(r.note.trim()),
+      }));
+      const ntRows = notices.filter((r) => r.target.trim()).map((r) => ({
+        product_id: id, notice_type: r.notice_type, target: r.target.trim(), detail: nullIfEmpty(r.detail.trim()),
+      }));
+
+      for (const [table, rows] of [["product_ingredients", ingRows], ["storage_rules", stRows], ["product_notices", ntRows]]) {
+        if (rows.length === 0) continue;
+        const { error: childErr } = await client.from(table).insert(rows);
+        if (childErr) {
+          // 일부만 저장되지 않도록 상품을 지워 되돌린다 (자식 행은 cascade로 함께 삭제)
+          await client.from("products").delete().eq("id", id);
+          throw childErr;
+        }
+      }
+      onSaved(id);
+    } catch (err) {
+      onError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const noticeOptions = Object.fromEntries(noticeTypes.map((t) => [t.code, t.label]));
+
+  return (
+    <section className="panel">
+      <h2>상품 추가</h2>
+      <form onSubmit={save}>
+        <div className="grid2">
+          <label>상품코드 *</label><input value={p.id} onChange={set("id")} placeholder="P-0500" />
+          <label>상품명 *</label><input value={p.name} onChange={set("name")} />
+          <label>분류</label><input value={p.category} onChange={set("category")} placeholder="신선 / 가공 / 냉동 등" />
+          <label>용량 *</label>
+          <div className="row">
+            <input type="number" step="any" value={p.net_amount} onChange={set("net_amount")} style={{ width: 120 }} />
+            <select value={p.unit} onChange={set("unit")}>{UNITS.map((u) => <option key={u}>{u}</option>)}</select>
+            <input value={p.pack_count} onChange={set("pack_count")} placeholder="입수 (예: 20개)" style={{ width: 140 }} />
+          </div>
+          <label>가격(원) *</label><input type="number" value={p.price} onChange={set("price")} />
+          <label>판매기간</label><input value={p.sale_period} onChange={set("sale_period")} placeholder="예: 4~7월 한정" />
+          <label>설명</label><textarea value={p.description} onChange={set("description")} />
+        </div>
+
+        <h3>원재료 <span className="muted">(원재료명이 빈 행은 저장 안 함)</span></h3>
+        <RowsEditor rows={ingredients} setRows={setIngredients} blank={BLANK_INGREDIENT} columns={[
+          { key: "ingredient", label: "원재료" },
+          { key: "origin", label: "원산지", placeholder: "모르면 비움" },
+          { key: "ratio", label: "비율", width: 80 },
+        ]} />
+
+        <h3>보관규칙 <span className="muted">(기간이 빈 행은 저장 안 함)</span></h3>
+        <RowsEditor rows={storage} setRows={setStorage} blank={BLANK_STORAGE} columns={[
+          { key: "phase", label: "시점", options: PHASE, width: 90 },
+          { key: "storage_type", label: "보관방식", options: { "": "(모름)", ...STORAGE_TYPE }, width: 90 },
+          { key: "period", label: "기간", type: "number", width: 70, placeholder: "0=당일" },
+          { key: "period_unit", label: "단위", options: PERIOD_UNIT, width: 70 },
+          { key: "note", label: "메모" },
+        ]} />
+
+        <h3>주의사항 <span className="muted">(대상이 빈 행은 저장 안 함)</span></h3>
+        <RowsEditor rows={notices} setRows={setNotices} blank={blankNotice} columns={[
+          { key: "notice_type", label: "유형", options: noticeOptions, width: 120 },
+          { key: "target", label: "대상", placeholder: "확인 결과 없으면 '없음'" },
+          { key: "detail", label: "내용" },
+        ]} />
+
+        <div className="row" style={{ marginTop: 16 }}>
+          <button className="primary" type="submit" disabled={saving}>{saving ? "저장 중…" : "저장"}</button>
+          <button type="button" onClick={onCancel} disabled={saving}>취소</button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+// ---------- 앱 ----------
+// Supabase 클라이언트 생성. 두 클라이언트가 같은 저장소 키를 쓰지 않도록 storageKey를 나눈다
+function makeClient(url, key, storageKey) {
+  return supabase.createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, storageKey } });
+}
+
+function App() {
+  // conn: { read: 조회용 클라이언트, admin: 추가 · 삭제용 클라이언트(없으면 null), host, source }
+  const [conn, setConn] = useState(null);
+  const [booting, setBooting] = useState(true);
+  const [noticeTypes, setNoticeTypes] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [mode, setMode] = useState("view");   // view | add
+  const [reloadToken, setReloadToken] = useState(0);
+  const [message, setMessage] = useState(null);
+
+  const showError = useCallback((err) => setMessage({ type: "err", text: explainError(err) }), []);
+  const showOk = (text) => setMessage({ type: "ok", text });
+
+  // { url, anonKey, serviceRoleKey } 로 연결하고 notice_types 조회로 연결 확인
+  const connect = async (cfg, source) => {
+    const read = makeClient(cfg.url, cfg.anonKey, "product-admin-read");
+    const admin = cfg.serviceRoleKey ? makeClient(cfg.url, cfg.serviceRoleKey, "product-admin-admin") : null;
+    const { data, error } = await read.from("notice_types").select("code, label").order("code");
+    if (error) throw error;
+    setNoticeTypes(data);
+    setConn({ read, admin, host: new URL(cfg.url).host, source });
+    setMessage(null);
+  };
+
+  // 로컬 서버(serve.ps1)가 .env.local을 읽어 넘겨주는 설정으로 자동 연결
+  const loadEnvConfig = useCallback(async () => {
+    setBooting(true);
+    try {
+      const res = await fetch("/api/config", { cache: "no-store" });
+      const cfg = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(cfg.error || `설정 요청 실패 (HTTP ${res.status})`);
+      await connect(cfg, ".env.local");
+    } catch (err) {
+      setConn(null);
+      setMessage({
+        type: "err",
+        text: ".env.local 설정으로 연결하지 못했습니다.\n" + explainError(err) +
+              "\n→ serve.ps1로 실행했는지, .env.local 값을 채웠는지 확인하세요. 아래에서 직접 입력할 수도 있습니다.",
+      });
+    } finally {
+      setBooting(false);
+    }
+  }, []);   // eslint-disable-line
+
+  useEffect(() => { loadEnvConfig(); }, [loadEnvConfig]);
+
+  // 직접 입력 (파일로 열었거나 .env.local을 못 읽을 때). 키 1개로 조회 · 쓰기를 모두 시도
+  const connectManual = async (cfg) => {
+    try {
+      await connect({ url: cfg.url, anonKey: cfg.key, serviceRoleKey: cfg.key }, "직접 입력");
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const reset = () => { setSelectedId(null); setMode("view"); setReloadToken((t) => t + 1); };
+
+  if (booting) {
+    return (
+      <>
+        <header><h1>상품 관리 (로컬)</h1></header>
+        <p className="muted" style={{ padding: "16px 20px" }}>.env.local 설정을 불러오는 중…</p>
+      </>
+    );
+  }
+
+  if (!conn) {
+    return (
+      <>
+        <header>
+          <h1>상품 관리 (로컬)</h1>
+          <button onClick={loadEnvConfig}>.env.local 다시 읽기</button>
+        </header>
+        {message && <div className={"msg " + message.type}>{message.text}</div>}
+        <ConnectForm onConnect={connectManual} />
+      </>
+    );
+  }
+
+  const client = conn.read;
+  return (
+    <>
+      <header>
+        <h1>상품 관리 (로컬)</h1>
+        <div className="row">
+          <span style={{ color: "#cfe0f0" }}>
+            {conn.host} · {conn.source} · {conn.admin ? "관리 모드 (service_role)" : "조회 전용 (anon)"}
+          </span>
+          {conn.admin && <button onClick={() => { setMode("add"); setSelectedId(null); setMessage(null); }}>+ 상품 추가</button>}
+          <button onClick={() => { reset(); loadEnvConfig(); }}>설정 다시 읽기</button>
+        </div>
+      </header>
+      {message && <div className={"msg " + message.type} onClick={() => setMessage(null)}>{message.text}</div>}
+      <main>
+        <ProductList client={client} selectedId={selectedId} reloadToken={reloadToken} onError={showError}
+                     onSelect={(id) => { setSelectedId(id); setMode("view"); setMessage(null); }} />
+        {mode === "add" ? (
+          <ProductForm client={conn.admin} noticeTypes={noticeTypes} onError={showError}
+                       onCancel={() => setMode("view")}
+                       onSaved={(id) => { showOk(`${id} 상품을 추가했습니다.`); setMode("view"); setSelectedId(id); setReloadToken((t) => t + 1); }} />
+        ) : selectedId ? (
+          <ProductDetail key={selectedId} client={client} adminClient={conn.admin} id={selectedId} onError={showError}
+                         onDeleted={(p) => { showOk(`${p.id} ${p.name} 상품을 삭제했습니다.`); setSelectedId(null); setReloadToken((t) => t + 1); }} />
+        ) : (
+          <section className="panel"><p className="muted">왼쪽 목록에서 상품을 고르거나 "+ 상품 추가"를 누르세요.</p></section>
+        )}
+      </main>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
